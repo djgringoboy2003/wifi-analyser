@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AirScope.Core\AirScope.Core.csproj" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\NativeWifi.cs" Link="NativeWifi.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\ReportService.cs" Link="ReportService.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\SystemServices.cs" Link="SystemServices.cs" />
+  </ItemGroup>
+</Project>

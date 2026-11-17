@@ -1,0 +1,33 @@
+name: Windows build and safety checks
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build, test and package
+        shell: powershell
+        run: ./scripts/Build.ps1 -Publish
+      - name: Render all screens without hardware
+        shell: powershell
+        run: |
+          $p = Start-Process -FilePath artifacts/AirScope-win-x64/AirScope.exe -ArgumentList '--smoke-test','--output',"$pwd/artifacts/ui-smoke/result.private.json" -WindowStyle Hidden -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw 'UI smoke test failed' }
+          $result = Get-Content artifacts/ui-smoke/result.private.json -Raw | ConvertFrom-Json
+          if (!$result.success -or $result.bindingErrors) { throw 'UI or binding validation failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirScope-windows-x64
+          path: artifacts/AirScope-win-x64.zip
+          if-no-files-found: error
+          retention-days: 30
