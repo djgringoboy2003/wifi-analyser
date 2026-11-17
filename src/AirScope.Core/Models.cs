@@ -65,7 +65,7 @@ public sealed record RecoveryPoint(string Id, DateTimeOffset CreatedAt, string A
 public static class Product
 {
     public const string Name = "AirScope";
-    public const string Version = "0.2.0";
+    public const string Version = "0.2.1";
     public const string SkyHelp = "https://www.sky.com/help/articles/change-wifi-max-hub-settings";
     public const string SkyHub = "Sky Gigafast+ Hub · XER10";
 }

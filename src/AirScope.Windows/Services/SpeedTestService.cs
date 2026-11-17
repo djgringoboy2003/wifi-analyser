@@ -204,11 +204,17 @@ public sealed class HttpsTransport : IThroughputTransport
         using var response = await _http.PostAsync(_options.UploadUrl, content, token); response.EnsureSuccessStatusCode();
     }
     public void Dispose() => _http.Dispose();
-    private sealed class PayloadContent(int size, Action<int> count) : HttpContent
+    internal sealed class PayloadContent(int size, Action<int> count) : HttpContent
     {
+        private int _started;
         protected override bool TryComputeLength(out long length) { length = size; return true; }
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => PayloadIO.WriteAsync(stream, size, count, CancellationToken.None);
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken token) => PayloadIO.WriteAsync(stream, size, count, token);
+        private Task WriteOnceAsync(Stream stream, CancellationToken token)
+        {
+            if (Interlocked.Exchange(ref _started, 1) != 0) throw new IOException("Upload replay is disabled to preserve the payload cap. Start a new measured test.");
+            return PayloadIO.WriteAsync(stream, size, count, token);
+        }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => WriteOnceAsync(stream, CancellationToken.None);
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken token) => WriteOnceAsync(stream, token);
     }
 }
 
@@ -229,6 +235,12 @@ public static class PayloadIO
     public static async Task WriteAsync(Stream stream, int count, Action<int> sent, CancellationToken token)
     {
         for (int remaining = count; remaining > 0;)
-        { int n = Math.Min(RandomBlock.Length, remaining); await stream.WriteAsync(RandomBlock.AsMemory(0, n), token); sent(n); remaining -= n; }
+        {
+            token.ThrowIfCancellationRequested();
+            int n = Math.Min(RandomBlock.Length, remaining);
+            // A failed write may have sent part of this block. Charge the attempt before writing;
+            // throughput is credited separately only when the whole request is acknowledged.
+            sent(n); await stream.WriteAsync(RandomBlock.AsMemory(0, n), token); remaining -= n;
+        }
     }
 }

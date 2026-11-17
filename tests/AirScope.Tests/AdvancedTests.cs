@@ -47,6 +47,28 @@ internal static class AdvancedTests
             try { PayloadIO.ReadAsync(stream, 32, _ => { }, CancellationToken.None).GetAwaiter().GetResult(); }
             catch (EndOfStreamException) { return; } throw new Exception("Truncation accepted");
         });
+        test("Partial upload write failures charge the attempted block", () =>
+        {
+            int charged = 0; using var stream = new PartialFailureStream();
+            try { PayloadIO.WriteAsync(stream, 70_000, n => charged += n, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (IOException) { Check(charged == 65_536 && stream.Length == 8); return; }
+            throw new Exception("Upload failure was ignored");
+        });
+        test("Already cancelled uploads do not charge another block", () =>
+        {
+            int charged = 0; using var stream = new MemoryStream(); using var stop = new CancellationTokenSource(); stop.Cancel();
+            try { PayloadIO.WriteAsync(stream, 70_000, n => charged += n, stop.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { Check(charged == 0 && stream.Length == 0); return; }
+            throw new Exception("Upload cancellation was ignored");
+        });
+        test("HTTP upload content cannot replay beyond its reserved payload", () =>
+        {
+            int charged = 0; using var content = new HttpsTransport.PayloadContent(1000, n => charged += n); using var first = new MemoryStream(); using var second = new MemoryStream();
+            content.CopyToAsync(first).GetAwaiter().GetResult();
+            try { content.CopyToAsync(second).GetAwaiter().GetResult(); }
+            catch (Exception error) when (error is IOException or HttpRequestException) { Check(charged == 1000 && first.Length == 1000 && second.Length == 0); return; }
+            throw new Exception("Upload replay was accepted");
+        });
         test("MLO buffer reports the connected widths and flag", () =>
         {
             var bytes = new byte[24 + 272 * 2];
@@ -149,6 +171,11 @@ internal static class AdvancedTests
         public async Task DownloadAsync(int count, Action<int> received, CancellationToken token) { token.ThrowIfCancellationRequested(); await Task.Yield(); received(count); }
         public async Task UploadAsync(int count, Action<int> sent, CancellationToken token) { token.ThrowIfCancellationRequested(); await Task.Yield(); sent(count); }
         public void Dispose() { }
+    }
+    private sealed class PartialFailureStream : MemoryStream
+    {
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        { Write(buffer.Span[..8]); return ValueTask.FromException(new IOException("Synthetic connection failure after a partial write")); }
     }
     private static async Task LoopbackAsync()
     {

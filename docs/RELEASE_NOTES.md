@@ -1,4 +1,6 @@
-# AirScope 0.2.0
+# AirScope 0.2.1
+
+The 0.2.1 patch conservatively charges attempted upload blocks when a write fails partway and blocks HTTP payload replays beyond the reserved test allowance. Three regression checks cover partial failures, pre-cancelled writes and replays. Public 0.2.0 assets are preserved.
 
 This release expands the Windows Wi-Fi manager into a measurement and recovery workspace for the MediaTek MT7925 and Sky XER10 setup.
 
