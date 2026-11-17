@@ -5,5 +5,9 @@
     <Compile Include="..\..\src\AirScope.Windows\Services\NativeWifi.cs" Link="NativeWifi.cs" />
     <Compile Include="..\..\src\AirScope.Windows\Services\ReportService.cs" Link="ReportService.cs" />
     <Compile Include="..\..\src\AirScope.Windows\Services\SystemServices.cs" Link="SystemServices.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\SpeedTestService.cs" Link="SpeedTestService.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\LanPeerService.cs" Link="LanPeerService.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\HistoryService.cs" Link="HistoryService.cs" />
+    <Compile Include="..\..\src\AirScope.Windows\Services\UpdateService.cs" Link="UpdateService.cs" />
   </ItemGroup>
 </Project>

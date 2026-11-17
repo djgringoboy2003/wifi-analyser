@@ -6,6 +6,7 @@ namespace AirScope.Windows;
 public partial class App : System.Windows.Application
 {
     private Mutex? _mutex;
+    private BackgroundMonitor? _background;
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -30,8 +31,32 @@ public partial class App : System.Windows.Application
             }
             return;
         }
-        _mutex = new Mutex(true, "Local\\AirScope-Desktop", out bool created);
-        if (!created) { MessageBox.Show("AirScope is already running. Open it from the system tray.", "AirScope"); Shutdown(); return; }
+        bool protectedWorker = e.Args.Length == 2 && e.Args[0] == "--protected-worker";
+        bool background = e.Args.Contains("--background") || protectedWorker || e.Args.Contains("--background-smoke");
+        _mutex = new Mutex(true, protectedWorker ? "Local\\AirScope-Protected-Worker" : "Local\\AirScope-Desktop", out bool created);
+        if (!created) { if (!background) MessageBox.Show("AirScope is already running. Open it from the system tray.", "AirScope"); Shutdown(); return; }
+        if (background)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try
+            {
+                var config = protectedWorker ? await ProtectedWorkerService.LoadAsync(e.Args[1]) : null;
+                bool smoke = e.Args.Contains("--background-smoke"); _background = new(config, smoke);
+                if (smoke)
+                {
+                    await Task.Delay(3500);
+                    string output = e.Args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? Path.Combine(Path.GetTempPath(), "AirScope-background.json");
+                    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+                    await File.WriteAllTextAsync(output, System.Text.Json.JsonSerializer.Serialize(new { success = true, windows = Windows.Count, workingSetMb = Environment.WorkingSet / 1_000_000d }));
+                    _background.Dispose(); Shutdown();
+                }
+            }
+            catch (Exception error)
+            {
+                Directory.CreateDirectory(JsonStore.Root); await File.AppendAllTextAsync(Path.Combine(JsonStore.Root, "background-errors.log"), DateTimeOffset.Now + " " + error.Message + Environment.NewLine); Shutdown(1);
+            }
+            return;
+        }
         DispatcherUnhandledException += (_, args) =>
         {
             try
@@ -45,5 +70,5 @@ public partial class App : System.Windows.Application
         };
         MainWindow = new MainWindow(); MainWindow.Show();
     }
-    protected override void OnExit(ExitEventArgs e) { _mutex?.Dispose(); base.OnExit(e); }
+    protected override void OnExit(ExitEventArgs e) { _background?.Dispose(); _mutex?.Dispose(); base.OnExit(e); }
 }

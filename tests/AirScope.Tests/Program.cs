@@ -71,5 +71,12 @@ if (OperatingSystem.IsWindows())
     if (hardwareArg >= 0 && hardwareArg + 1 < args.Length)
         Test("Live adapter advanced properties deserialize", () => { var hardware = HardwareService.ReadAsync(Guid.Parse(args[hardwareArg + 1])).GetAwaiter().GetResult(); Check(hardware.Properties.Count > 0); Console.WriteLine($"  {hardware.Properties.Count} advanced properties read"); });
 }
+AdvancedTests.Run(Test, args);
+if (args.Contains("--quality") && OperatingSystem.IsWindows())
+{
+    using var wifi = new NativeWifi();
+    var selected = wifi.Interfaces().FirstOrDefault(i => i.State == 1);
+    if (selected is not null) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(wifi.Quality(selected.Id)));
+}
 Console.WriteLine($"\n{passed} passed; {failed} failed.");
 return failed == 0 ? 0 : 1;

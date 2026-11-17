@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/AirScope.Core/AirScope.Core.csproj" />
+    <Project Path="src/AirScope.Setup/AirScope.Setup.csproj" />
     <Project Path="src/AirScope.Windows/AirScope.Windows.csproj" />
   </Folder>
   <Folder Name="/tests/">

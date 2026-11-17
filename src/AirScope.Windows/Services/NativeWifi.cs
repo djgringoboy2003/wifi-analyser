@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using AirScope.Core;
@@ -9,9 +10,15 @@ public sealed class NativeWifi : IDisposable
 {
     private nint _handle;
     private readonly object _gate = new();
+    private readonly NotificationCallback _callback;
+    private readonly ConcurrentDictionary<Guid, TaskCompletionSource<bool>> _scans = new();
+    private readonly ConcurrentQueue<WifiEvent> _events = new();
+    public bool NotificationsSupported { get; }
     public NativeWifi()
     {
         Check(WlanOpenHandle(2, 0, out _, out _handle));
+        _callback = OnNotification;
+        NotificationsSupported = WlanRegisterNotification(_handle, 8, true, _callback, 0, 0, out _) == 0;
     }
     public IReadOnlyList<WifiInterface> Interfaces()
     {
@@ -55,6 +62,61 @@ public sealed class NativeWifi : IDisposable
     public void RequestScan(Guid id)
     {
         lock (_gate) Check(WlanScan(_handle, ref id, 0, 0, 0));
+    }
+    public async Task<bool> ScanAsync(Guid id, CancellationToken token)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_scans.TryAdd(id, completion)) return false;
+        try
+        {
+            RequestScan(id);
+            if (!NotificationsSupported) { await Task.Delay(4000, token); return false; }
+            var winner = await Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromSeconds(8), token));
+            token.ThrowIfCancellationRequested();
+            if (winner != completion.Task) return false;
+            if (!await completion.Task) throw new InvalidOperationException("The driver reported that the Wi-Fi scan failed.");
+            return true;
+        }
+        finally { _scans.TryRemove(id, out _); }
+    }
+    public RealtimeQuality Quality(Guid id)
+    {
+        lock (_gate)
+        {
+            uint status = WlanQueryInterface(_handle, ref id, 19, 0, out uint size, out nint data, out _);
+            if (status != 0) return new(false, false, 0, 0, 0, "Unavailable", [], new Win32Exception((int)status).Message);
+            try
+            {
+                if (size < RealtimeDecoder.HeaderBytes || size > RealtimeDecoder.HeaderBytes + 16 * RealtimeDecoder.LinkBytes)
+                    return new(false, false, 0, 0, 0, "Unavailable", [], "Unrecognised real-time WLAN buffer length.");
+                var bytes = new byte[size]; Marshal.Copy(data, bytes, 0, bytes.Length);
+                try { return RealtimeDecoder.Decode(bytes); }
+                catch (Exception error) when (error is InvalidDataException or OverflowException)
+                { return new(false, false, 0, 0, 0, "Unavailable", [], error.Message); }
+            }
+            finally { WlanFreeMemory(data); }
+        }
+    }
+    public IReadOnlyList<WifiEvent> DrainEvents()
+    {
+        var items = new List<WifiEvent>();
+        while (items.Count < 256 && _events.TryDequeue(out var item)) items.Add(item);
+        return items;
+    }
+    private void OnNotification(nint pointer, nint context)
+    {
+        try
+        {
+            var n = Marshal.PtrToStructure<NotificationData>(pointer);
+            if (n.Source != 8) return;
+            if (n.Code is 7 or 8 && _scans.TryGetValue(n.Id, out var pending)) pending.TrySetResult(n.Code == 7);
+            string? kind = n.Code switch { 7 => "Scan complete", 8 => "Scan failed", 9 => "Connecting", 10 => "Connected", 11 => "Connection failed", 13 => "Adapter arrived", 14 => "Adapter removed", 20 => "Disconnecting", 21 => "Disconnected", _ => null };
+            if (kind is null) return;
+            uint? reason = n.Code == 8 && n.DataSize >= 4 && n.Data != 0 ? unchecked((uint)Marshal.ReadInt32(n.Data)) : null;
+            _events.Enqueue(new(DateTimeOffset.Now, n.Id, kind, reason.HasValue ? $"Windows WLAN reason {reason}" : "Reported by Windows WLAN notifications.", reason));
+            while (_events.Count > 256) _events.TryDequeue(out _);
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException) { /* Never throw across an unmanaged callback. */ }
     }
     public IReadOnlyList<AccessPoint> Networks(Guid id)
     {
@@ -144,7 +206,13 @@ public sealed class NativeWifi : IDisposable
             finally { WlanFreeMemory(list); }
         }
     }
-    public void Dispose() { lock (_gate) { if (_handle != 0) WlanCloseHandle(_handle, 0); _handle = 0; } }
+    public void Dispose()
+    {
+        if (_handle != 0 && NotificationsSupported) WlanRegisterNotification(_handle, 0, true, null, 0, 0, out _);
+        foreach (var scan in _scans.Values) scan.TrySetCanceled();
+        lock (_gate) { if (_handle != 0) WlanCloseHandle(_handle, 0); _handle = 0; }
+        GC.KeepAlive(_callback);
+    }
     private static string Ssid(Dot11Ssid ssid) => Encoding.UTF8.GetString(ssid.Bytes, 0, (int)Math.Min(ssid.Length, 32));
     private static string Hex(Dot11Ssid ssid) => Convert.ToHexString(ssid.Bytes.AsSpan(0, (int)Math.Min(ssid.Length, 32)));
     private static string Mac(byte[] bytes) => string.Join(":", bytes.Select(b => b.ToString("x2")));
@@ -153,6 +221,8 @@ public sealed class NativeWifi : IDisposable
     private static string Auth(uint auth) => auth switch { 1 => "Open", 4 => "WPA", 6 => "WPA2-Enterprise", 7 => "WPA2-Personal", 8 or 11 or 12 => "WPA3-Enterprise", 9 => "WPA3-Personal", 10 => "Enhanced Open", _ => $"Authentication {auth}" };
 
     [StructLayout(LayoutKind.Sequential)] private struct Dot11Ssid { public uint Length; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] Bytes; }
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)] private delegate void NotificationCallback(nint data, nint context);
+    [StructLayout(LayoutKind.Sequential)] private struct NotificationData { public uint Source, Code; public Guid Id; public uint DataSize; public nint Data; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct InterfaceInfo { public Guid Id; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Description; public int State; }
     [StructLayout(LayoutKind.Sequential)] private struct RateSet { public uint Length; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 126)] public ushort[] Rates; }
     [StructLayout(LayoutKind.Sequential)] private struct BssEntry
@@ -173,6 +243,7 @@ public sealed class NativeWifi : IDisposable
     { public uint Mode; [MarshalAs(UnmanagedType.LPWStr)] public string Profile; public nint Ssid, DesiredBssidList; public uint BssType, Flags; }
 
     [DllImport("wlanapi.dll")] private static extern uint WlanOpenHandle(uint version, nint reserved, out uint negotiated, out nint handle);
+    [DllImport("wlanapi.dll")] private static extern uint WlanRegisterNotification(nint handle, uint source, [MarshalAs(UnmanagedType.Bool)] bool ignoreDuplicates, NotificationCallback? callback, nint context, nint reserved, out uint previous);
     [DllImport("wlanapi.dll")] private static extern uint WlanCloseHandle(nint handle, nint reserved);
     [DllImport("wlanapi.dll")] private static extern uint WlanEnumInterfaces(nint handle, nint reserved, out nint list);
     [DllImport("wlanapi.dll")] private static extern void WlanFreeMemory(nint memory);

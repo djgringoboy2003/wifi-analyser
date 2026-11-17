@@ -44,7 +44,10 @@ public sealed record LatencyResult(string Target, int Sent, int Received, double
     public double LossPercent => Sent == 0 ? 0 : 100d * (Sent - Received) / Sent;
 }
 public sealed record SpeedResult(DateTimeOffset Time, string Ssid, string Bssid, WifiBand Band, double DownloadMbps,
-    double? UploadMbps, long DownloadBytes, long UploadBytes, string Endpoint, string? UploadError = null)
+    double? UploadMbps, long DownloadBytes, long UploadBytes, string Endpoint, string? UploadError = null,
+    double DownloadSeconds = 0, double UploadSeconds = 0, int Streams = 1, bool DataLimited = false,
+    LatencyResult? IdleLatency = null, LatencyResult? LoadedLatency = null, string Transport = "HTTPS",
+    long WarmupBytes = 0)
 {
     public string BandLabel => RadioMath.Label(Band);
 }
@@ -62,7 +65,7 @@ public sealed record RecoveryPoint(string Id, DateTimeOffset CreatedAt, string A
 public static class Product
 {
     public const string Name = "AirScope";
-    public const string Version = "0.1.0";
+    public const string Version = "0.2.0";
     public const string SkyHelp = "https://www.sky.com/help/articles/change-wifi-max-hub-settings";
     public const string SkyHub = "Sky Gigafast+ Hub · XER10";
 }

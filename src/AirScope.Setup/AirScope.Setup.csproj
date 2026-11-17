@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>AirScope-Setup</AssemblyName><RootNamespace>AirScope.Setup</RootNamespace>
+    <ApplicationIcon>..\AirScope.Windows\Assets\AirScope.ico</ApplicationIcon>
+    <AirScopePayloadPath Condition="'$(AirScopePayloadPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\AirScope-win-x64.zip</AirScopePayloadPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="$(AirScopePayloadPath)" Condition="Exists('$(AirScopePayloadPath)')" LogicalName="AirScope.Setup.Payload.zip" />
+    <EmbeddedResource Include="..\..\scripts\Install-AirScope.ps1" LogicalName="AirScope.Setup.Install.ps1" />
+  </ItemGroup>
+</Project>

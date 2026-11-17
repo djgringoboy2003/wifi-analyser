@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private IReadOnlyList<AccessPoint> _networks = [];
     private Connection? _connection;
     private AdapterDetails? _hardware;
+    private RealtimeQuality? _quality;
     private OptimisationPlan? _plan;
     private CancellationTokenSource? _test;
     private Forms.NotifyIcon? _tray;
@@ -41,10 +42,12 @@ public partial class MainWindow : Window
     private int _ticks;
     private long _received, _sent, _previousRx = -1, _previousTx = -1;
 
-    public MainWindow(bool smokeTest = false)
+    public MainWindow(bool smokeTest = false, WorkerConfiguration? worker = null)
     {
         _smokeTest = smokeTest;
-        _settings = smokeTest ? new() : JsonStore.Read<UserSettings>("settings.json") ?? new();
+        _settings = smokeTest ? new() : UserSettings.Load();
+        _workerMode = worker is not null;
+        if (worker is not null) { _settings.Automation = worker.Policy; _settings.TestOptions = worker.Options; _settings.AdapterId = worker.AdapterId; _settings.TargetSsid = ""; }
         _settings.ScanSeconds = Math.Clamp(_settings.ScanSeconds, 15, 120);
         _speeds = smokeTest ? [] : JsonStore.Read<List<SpeedResult>>("speed-history.json") ?? [];
         InitializeComponent();
@@ -52,6 +55,7 @@ public partial class MainWindow : Window
         AutoScanSetting.IsChecked = _settings.AutoScan; TraySetting.IsChecked = _settings.MinimiseToTray;
         WidgetSetting.IsChecked = _settings.ShowWidget; DesktopSetting.IsChecked = _settings.DesktopTuning;
         TargetSsidBox.Text = _settings.TargetSsid; NetworkOwnOnly.IsChecked = _settings.OwnSsidOnly;
+        InitialiseAdvanced();
         _timer.Tick += OnTick;
         _ready = true;
     }
@@ -95,7 +99,7 @@ public partial class MainWindow : Window
     private async void ScanClick(object sender, RoutedEventArgs e) => await ScanAsync();
     private async Task ScanAsync()
     {
-        if (_test is not null || _adminBusy || !await _scanGate.WaitAsync(0)) return;
+        if (_test is not null || _adminBusy || _experimentBusy || !await _scanGate.WaitAsync(0)) return;
         ScanButton.IsEnabled = false;
         try
         {
@@ -112,14 +116,12 @@ public partial class MainWindow : Window
             }
             Guid id = _adapterId.Value;
             Status("Scanning nearby access points…");
-            await Task.Run(() => _wifi.RequestScan(id));
-            // WlanScan is asynchronous; wait for driver scan results. Beacon timestamps stay visible.
-            await Task.Delay(2800, _shutdown.Token);
+            bool completed = await _wifi.ScanAsync(id, _shutdown.Token);
             var networks = await Task.Run(() => _wifi.Networks(id));
             var connection = await Task.Run(() => _wifi.Current(id));
             if (_adapterId != id) return;
             _networks = networks.Where(p => DateTimeOffset.Now - p.SeenAt < TimeSpan.FromSeconds(90)).ToArray();
-            _connection = connection; _lastScan = DateTimeOffset.Now;
+            _connection = connection; _quality = _wifi.Quality(id); _lastScan = DateTimeOffset.Now;
             NoticeBorder.Visibility = Visibility.Collapsed;
             if (string.IsNullOrEmpty(_settings.TargetSsid) && connection is not null)
             {
@@ -127,7 +129,7 @@ public partial class MainWindow : Window
             }
             _targetHex = _networks.FirstOrDefault(p => p.Ssid == _settings.TargetSsid)?.SsidHex
                 ?? (connection?.Ssid == _settings.TargetSsid ? connection.SsidHex : "");
-            UpdateView(); Status($"Scan complete · {_networks.Count} access points · {_lastScan:T}");
+            UpdateView(); Status($"{(completed ? "Scan complete" : "Scan notification unavailable; showing dated observations")} · {_networks.Count} access points · {_lastScan:T}");
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
         catch (Exception error)
@@ -154,6 +156,7 @@ public partial class MainWindow : Window
         ConnectionDetails.Text = _connection is null ? "Connection details are unavailable. Live traffic monitoring can continue if the adapter is up." :
             $"Band       {current?.BandLabel ?? "Not reported"}\nChannel    {current?.Channel.ToString() ?? "—"}\nSecurity   {_connection.Security}\nTransmit   {_connection.TxLinkMbps:N0} Mbps\nGateway    {gateway ?? "Not reported"}\nProfile    {_connection.Profile}";
         Band24Summary.Text = BandSummary(WifiBand.Band24); Band5Summary.Text = BandSummary(WifiBand.Band5); Band6Summary.Text = BandSummary(WifiBand.Band6);
+        UpdateQualityView();
         ScanTimestamp.Text = _lastScan == DateTimeOffset.MinValue ? "Not scanned yet" : $"Last collection {_lastScan:T}";
         RefreshNetworks(); RefreshChannels();
             if (_plan is not null && _plan.AdapterId != _adapterId) InvalidatePlan();
@@ -167,7 +170,7 @@ public partial class MainWindow : Window
         if (own.Length == 0) return $"Your SSID not observed\n{others} neighbouring access points\nNo speed inferred";
         var best = own[0];
         bool active = own.Any(p => p.Bssid == _connection?.Bssid);
-        return $"{(active ? "● Connected" : "Available")} · channel {best.Channel}\n{best.Rssi} dBm · {best.WidthLabel}\n{(result is null ? "Not speed-tested" : $"Last test: {result.DownloadMbps:F0} Mbps ↓ · {result.Time:dd MMM HH:mm}")}";
+        return $"{(active ? "● Connected" : "Available")} · channel {best.Channel}\n{best.Rssi} dBm · AP advertises {best.WidthLabel}\n{(result is null ? "Not speed-tested" : $"Last test: {result.DownloadMbps:F0} Mbps ↓ · {result.Time:dd MMM HH:mm}")}";
     }
     private void OnTick(object? sender, EventArgs e)
     {
@@ -189,6 +192,7 @@ public partial class MainWindow : Window
             }
             else { DownloadValue.Text = "—"; UploadValue.Text = "—"; _widget?.Update(null, null); LiveBadge.Text = "○  WAITING FOR WI-FI"; _previousRx = _previousTx = -1; }
             if (_ticks % 5 == 0) RefreshRecovery();
+            AdvancedTick(sample);
             if (_settings.AutoScan && DateTimeOffset.Now - _lastScan >= TimeSpan.FromSeconds(_settings.ScanSeconds)) _ = ScanAsync();
         }
         catch (Exception error) when (error is System.Net.NetworkInformation.NetworkInformationException or IOException or UnauthorizedAccessException)
@@ -266,6 +270,7 @@ public partial class MainWindow : Window
         Status("Waiting for Windows administrator approval and the protected operation…");
         try
         {
+            if (request.Operation == "apply") request = request with { ExpectedSsidHex = _connection?.SsidHex };
             var response = await ElevationService.ExecuteAsync(request);
             if (!response.Success) throw new InvalidOperationException(response.Message);
             Status(response.Message); return response;
@@ -410,19 +415,24 @@ public partial class MainWindow : Window
         catch (Exception error) { TestProgress.Text = error.Message; Error(error); }
         finally { FinishTest(); }
     }
-    private async Task RunSpeedAsync(Connection connection, WifiBand band, CancellationToken token)
+    private async Task<SpeedResult> RunSpeedAsync(Connection connection, WifiBand band, CancellationToken token, ThroughputOptions? requestedOptions = null)
     {
         var progress = new Progress<string>(message => TestProgress.Text = $"{RadioMath.Label(band)} · {message}");
-        var result = await new SpeedTestService().RunAsync(connection, band, IncludeUpload.IsChecked == true, progress, token);
+        var options = requestedOptions ?? _settings.TestOptions with { Upload = IncludeUpload.IsChecked == true };
+        var result = await MeasureWithBudgetAsync(connection, band, options, progress, token);
         var after = _wifi!.Current(connection.InterfaceId);
         if (after?.Bssid != connection.Bssid || after.SsidHex != connection.SsidHex)
             throw new InvalidOperationException("The access point changed during the test. The result was discarded to avoid assigning it to the wrong band.");
-        _speeds.Insert(0, result); if (_speeds.Count > 250) _speeds.RemoveRange(250, _speeds.Count - 250);
-        if (!_smokeTest) JsonStore.Write("speed-history.json", _speeds);
+        if (_smokeTest) { _speeds.Insert(0, result); if (_speeds.Count > 250) _speeds.RemoveRange(250, _speeds.Count - 250); }
+        else { var saved = JsonStore.AppendSpeed(result); _speeds.Clear(); _speeds.AddRange(saved); }
         MeasuredDownload.Text = $"{result.DownloadMbps:F1} Mbps";
-        MeasuredUpload.Text = result.UploadMbps is double up ? $"{up:F1} Mbps" : "Unavailable";
-        TestProgress.Text = $"{RadioMath.Label(band)} · complete · {result.DownloadBytes / 1_000_000d:F0} MB downloaded. " + result.UploadError;
+        MeasuredUpload.Text = result.UploadMbps is double up ? $"{up:F1} Mbps" : options.Upload ? "Unavailable" : "Not tested";
+        TestProgress.Text = $"{RadioMath.Label(band)} · {result.Streams} streams · {result.DownloadSeconds:F1}s download · {(result.DataLimited ? "payload cap reached" : "duration complete")} · {result.DownloadBytes / 1_000_000d:F1} MB ↓. " + result.UploadError;
+        AppendHistory(new(result.Time, "Speed test", connection.InterfaceId, connection.Ssid, connection.Bssid, band,
+            DownloadMbps: result.DownloadMbps, UploadMbps: result.UploadMbps, LatencyMs: result.LoadedLatency?.AverageMs,
+            Detail: $"{result.Transport}; {result.DownloadSeconds:F1}s; {result.Streams} streams; cap reached: {result.DataLimited}"));
         RefreshHistory(); UpdateView();
+        return result;
     }
     private async void CompareBandsClick(object sender, RoutedEventArgs e)
     {
@@ -435,7 +445,7 @@ public partial class MainWindow : Window
             var candidates = _networks.Where(p => p.SsidHex == _targetHex && p.InRegulatoryDomain)
                 .GroupBy(p => p.Band).Where(g => g.Key != WifiBand.Unknown).Select(g => g.OrderByDescending(p => p.Rssi).First()).OrderBy(p => p.Band).ToArray();
             if (candidates.Length < 2) throw new InvalidOperationException("At least two bands of your connected SSID must be observed in the current scan.");
-            if (MessageBox.Show(this, $"Test {candidates.Length} available bands in turn? This can briefly interrupt Wi-Fi and use up to {candidates.Length * (IncludeUpload.IsChecked == true ? 144 : 128)} MB of test traffic.\n\nAirScope will use your saved profile, verify the actual BSSID before each test, then restore the original connection. Keep the app open until it finishes.", "Compare Wi-Fi bands", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+            if (MessageBox.Show(this, $"Test {candidates.Length} available bands in turn? This can briefly interrupt Wi-Fi and use up to {candidates.Length * _settings.TestOptions.MaxBytes / 1_000_000} MB of payload, plus protocol overhead.\n\nAirScope will verify the actual BSSID before each test, then restore the original connection. The daily quota is enforced for every band. Keep the app open until it finishes.", "Compare Wi-Fi bands", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
             original = _wifi.Current(_connection.InterfaceId) ?? throw new InvalidOperationException("The connection was lost."); originalAp = current;
             _test = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token); _benchmark = true; SetTesting(true);
             List<string> skipped = [];
@@ -512,7 +522,7 @@ public partial class MainWindow : Window
     }
     private void SaveSettings()
     {
-        if (_smokeTest) return;
+        if (_smokeTest || _workerMode) return;
         _settings.AdapterId = _adapterId; _settings.OwnSsidOnly = NetworkOwnOnly.IsChecked == true;
         try { JsonStore.Write("settings.json", _settings); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { Status("Settings could not be saved: " + error.Message); }
     }
@@ -524,7 +534,7 @@ public partial class MainWindow : Window
         menu.Items.Add("Open AirScope", null, (_, _) => Dispatcher.Invoke(ShowMain));
         menu.Items.Add("Toggle speed widget", null, (_, _) => Dispatcher.Invoke(() => WidgetSetting.IsChecked = !_settings.ShowWidget));
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(Close)); _tray.ContextMenuStrip = menu;
+        menu.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(() => { _exiting = true; Close(); })); _tray.ContextMenuStrip = menu;
     }
     private void ShowMain() { Show(); WindowState = WindowState.Normal; Activate(); }
     private void UpdateWidget()
@@ -540,10 +550,12 @@ public partial class MainWindow : Window
     { if (WindowState == WindowState.Minimized && _settings.MinimiseToTray && _tray is not null) Hide(); }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        if (!_smokeTest && !_exiting && !_benchmark && !_adminBusy && _settings.Automation.BackgroundMode) { e.Cancel = true; Hide(); return; }
         if (_adminBusy) { e.Cancel = true; Status("Wait for the protected operation to finish before exiting."); return; }
         if (_benchmark && !_exiting) { e.Cancel = true; _exitAfterTest = true; _test?.Cancel(); Status("Cancelling the comparison and restoring the original connection before exiting…"); return; }
         _exiting = true; _timer.Stop(); _test?.Cancel(); _shutdown.Cancel();
         SaveSettings(); _tray?.Dispose(); _widget?.Close(); _wifi?.Dispose();
+        Advanced.Dispose();
     }
     private static void Open(string target) => Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
     private void LocationClick(object sender, RoutedEventArgs e) => Open("ms-settings:privacy-location");
@@ -609,12 +621,15 @@ public partial class MainWindow : Window
                     await Task.Delay(1200); OnTick(null, EventArgs.Empty);
                     if (args.Contains("--speed-test") && _connection is not null && CurrentAp() is AccessPoint ap)
                     {
+                        int capArg = Array.IndexOf(args, "--test-mb");
+                        if (capArg >= 0 && capArg + 1 < args.Length && int.TryParse(args[capArg + 1], out int mb) && mb is >= 1 and <= 256)
+                            _settings.TestOptions = _settings.TestOptions with { MaxBytes = mb * 1_000_000L, SecondsPerDirection = 3 };
                         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(100));
                         await RunSpeedAsync(_connection, ap.Band, timeout.Token);
                     }
                 }
             }
-            foreach (int page in Enumerable.Range(0, 7))
+            foreach (int page in Enumerable.Range(0, Pages.Items.Count))
             {
                 var nav = FindNavigation(page); if (nav is not null) nav.IsChecked = true;
                 Pages.SelectedIndex = page; UpdateLayout();
@@ -623,10 +638,14 @@ public partial class MainWindow : Window
                 image.Render(this); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
                 using var file = File.Create(Path.Combine(directory, $"page-{page}.private.png")); encoder.Save(file);
             }
-            Pages.SelectedIndex = 0;
-            var summary = new { success = true, pages = 7, live, accessPoints = _networks.Count, connected = _connection is not null,
+            Pages.SelectedIndex = 7; UpdateLayout(); await Advanced.RenderSmokePagesAsync(directory); Pages.SelectedIndex = 0;
+            var summary = new { success = true, pages = Pages.Items.Count, toolPages = Advanced.PageCount, live, accessPoints = _networks.Count, connected = _connection is not null,
                 hardwareProperties = _hardware?.Properties.Count ?? 0, speedTests = _speeds.Count,
+                realtimeSupported = _quality?.Supported, mlo = _quality?.Supported == true ? _quality.IsMlo : (bool?)null, connectedLinks = _quality?.Links.Count,
+                realtimeDetail = _quality?.UnavailableReason, links = _quality?.Links,
                 lastDownloadMbps = _speeds.FirstOrDefault()?.DownloadMbps, lastUploadMbps = _speeds.FirstOrDefault()?.UploadMbps,
+                downloadSeconds = _speeds.FirstOrDefault()?.DownloadSeconds, downloadBytes = _speeds.FirstOrDefault()?.DownloadBytes,
+                uploadBytes = _speeds.FirstOrDefault()?.UploadBytes, dataLimited = _speeds.FirstOrDefault()?.DataLimited,
                 bindingErrors = bindingErrors.ToString() };
             await File.WriteAllTextAsync(output, JsonSerializer.Serialize(summary, JsonStore.Options));
         }

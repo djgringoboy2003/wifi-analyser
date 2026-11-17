@@ -127,7 +127,7 @@ try {
     $id=[guid]::NewGuid().ToString('D'); $path=Join-Path $root ($id+'.json')
     $s=[pscustomobject]@{Version=1;Id=$id;CreatedAt=[DateTimeOffset]::Now.ToString('o');Adapter=$adapter.Name;
         AdapterId=$adapterId.ToString('D');AdapterDescription=$adapter.InterfaceDescription;State='Captured';
-        Description='Adapter snapshot captured. No changes applied.';RollbackAt=$null;RestorePointSequence=$null;Changes=$changes}
+        Description='Adapter snapshot captured. No changes applied.';RollbackAt=$null;RestorePointSequence=$null;Changes=$changes;ExpectedSsidHex=[string]$request.ExpectedSsidHex}
     Save-Snapshot $s $path
     if ($Operation -eq 'snapshot') {
         [pscustomobject]@{Id=$id;State=$s.State;Message=$s.Description} | ConvertTo-Json -Compress

@@ -1,6 +1,6 @@
 # Sources and implementation decisions
 
-References checked while implementing this initial release on 17 November 2026. Links are upstream documentation, not runtime dependencies.
+References checked while implementing versions 0.1 and 0.2 on 17 November 2026. Links are upstream documentation, not runtime dependencies.
 
 ## Windows APIs
 
@@ -10,6 +10,10 @@ References checked while implementing this initial release on 17 November 2026. 
 - [WlanConnect](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanconnect) and [WLAN_CONNECTION_PARAMETERS](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/ns-wlanapi-wlan_connection_parameters): saved-profile connections and desired BSSID requests. A successful request is not proof of association; the app polls and verifies actual BSSID.
 - [DOT11_PHY_TYPE](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/windot11/ne-windot11-_dot11_phy_type): HE is 10, EHT is 11; this matters when distinguishing Wi-Fi 6 from Wi-Fi 7.
 - [Checkpoint-Computer](https://learn.microsoft.com/en-us/powershell/module/Microsoft.PowerShell.Management/checkpoint-computer?view=powershell-5.1): system restore-point behaviour and frequency restrictions. The app requires a newly verified point before tuning.
+- [WLAN_REALTIME_CONNECTION_QUALITY](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/ns-wlanapi-wlan_realtime_connection_quality), [WLAN_REALTIME_CONNECTION_QUALITY_LINK_INFO](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/ns-wlanapi-wlan_realtime_connection_quality_link_info) and [WLAN_INTF_OPCODE](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/ne-wlanapi-wlan_intf_opcode): connected link/MLO telemetry. Installed Windows SDK 10.0.26100.0 confirms the bounded native layout. The MT7925's undocumented bandwidth code is preserved without assigning a guessed MHz width. Recognised MHz/kHz frequencies are normalised conservatively.
+- [WlanRegisterNotification](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanregisternotification): scan-completion and connection events. The managed callback stays rooted and queues bounded records without calling back into WLAN under a callback lock.
+- [Get-AuthenticodeSignature](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticodesignature?view=powershell-5.1): valid trusted signatures and publisher pins for the protected worker and update application. An unsigned download cannot acquire those permissions by supplying its own certificate fingerprint.
+- [GitHub CLI release creation](https://cli.github.com/manual/gh_release_create): the checked CI artifact set is first uploaded to a draft; published assets are not overwritten on subsequent builds of the same version.
 
 Native interop uses the stable desktop WLAN API directly, not localised `netsh` output. PowerShell uses the installed NetAdapter module for protected adapter properties; production scripts interpolate only quoted JSON or GUIDs, never unescaped SSID names or arbitrary shell commands.
 
@@ -34,5 +38,7 @@ Hub controls stay in Sky's supported interfaces. Router capabilities are supplem
 ## Validation boundary
 
 Automated core tests cover channel conversion, bonded overlap, malformed/truncated beacon parsing, model limits, planner value mappings, unsafe execution requests, monotonic counters, loss/jitter, native layouts, export escaping/redaction and the PowerShell bridge. Recovery tests use fault injection with mocks, including blocked prerequisites, stale state, failed writes, manual restoration, expiry, scheduled rollback and failed recovery.
+
+Version 0.2 adds bounded multi-stream byte accounting/cancellation, MLO buffers/unknown fields, comparison guardrails, quota reservations, concurrent history writes, long-range history filtering, LAN token/loopback transfers and update-source constraints. Package checks install/upgrade/uninstall inside a unique test directory with registry/shortcut/launch integration disabled and prove unknown-file preservation and unmarked-directory refusal. The real hardware read and live bounded HTTPS measurement are opt-in; private captures stay outside source control.
 
 UI smoke tests render every page and capture WPF binding failures. Optional hardware smoke tests call the real scanner/driver readers; optional current-link speed tests exercise real HTTPS transfers. No automated development test writes real adapter properties, creates real restore points, installs real scheduled tasks or switches Wi-Fi bands. Those paths require validation on a disposable/test Windows installation before release-grade reliability can be claimed.

@@ -6,7 +6,7 @@ using AirScope.Core;
 
 namespace AirScope.Windows.Services;
 
-public sealed record AdminRequest(string Operation, Guid AdapterId, OptimisationPlan? Plan = null, string? RecoveryId = null);
+public sealed record AdminRequest(string Operation, Guid AdapterId, OptimisationPlan? Plan = null, string? RecoveryId = null, string? ExpectedSsidHex = null, WorkerConfiguration? Worker = null);
 public sealed record AdminResponse(bool Success, string Message, JsonElement? Data = null);
 
 public static class ElevationService
@@ -54,16 +54,36 @@ public static class ElevationService
                 ?? throw new InvalidDataException("The operation request is invalid.");
             string result;
             if (request.Operation == "inspect") result = await PowerShellRunner.RunAsync(HardwareService.Script(request.AdapterId));
+            else if (request.Operation == "preflight") result = await PowerShellRunner.RunAsync(RecoveryHealthService.PreflightScript(request.AdapterId));
+            else if (request.Operation is "worker-install" or "worker-remove")
+                result = JsonSerializer.Serialize(new { Message = await ProtectedWorkerService.ConfigureAsync(request.Worker, request.Operation == "worker-remove") });
             else
             {
                 if (request.Operation is not ("apply" or "snapshot" or "rollback" or "keep")) throw new InvalidOperationException("Unsupported operation.");
-                if (request.Operation == "apply") OptimisationPlanner.Validate(request.Plan ?? throw new InvalidOperationException("No optimisation plan supplied."));
+                if (request.Operation == "apply")
+                {
+                    OptimisationPlanner.Validate(request.Plan ?? throw new InvalidOperationException("No optimisation plan supplied."));
+                    if (request.Plan.AdapterId != request.AdapterId || DateTimeOffset.Now - request.Plan.CreatedAt > TimeSpan.FromMinutes(10) || request.Plan.CreatedAt > DateTimeOffset.Now.AddMinutes(1)
+                        || request.ExpectedSsidHex is not { Length: > 0 and <= 64 } || !request.ExpectedSsidHex.All(Uri.IsHexDigit))
+                        throw new InvalidOperationException("Adapter, plan age or expected SSID does not match this request.");
+                    using var healthLimit = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    var health = await RecoveryHealthService.HealthAsync(request.AdapterId, request.ExpectedSsidHex, healthLimit.Token);
+                    if (!health.Ready) throw new InvalidOperationException("Pre-trial health check failed: " + string.Join("; ", health.Checks.Where(c => !c.Passed).Select(c => c.Name + ": " + c.Detail)));
+                }
                 if (request.Operation is "rollback" or "keep" && !Guid.TryParseExact(request.RecoveryId, "D", out _))
                     throw new InvalidDataException("Invalid recovery identifier.");
+                if (request.Operation == "keep")
+                {
+                    var expected = RecoveryHealthService.ExpectedNetwork(request.RecoveryId!);
+                    if (expected.AdapterId != request.AdapterId) throw new InvalidOperationException("The trial adapter does not match the Keep request.");
+                    using var healthLimit = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    var health = await RecoveryHealthService.HealthAsync(request.AdapterId, expected.Ssid, healthLimit.Token);
+                    if (!health.Ready) throw new InvalidOperationException("The trial cannot be kept because connection health was not verified. The independent rollback remains active.");
+                }
                 using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("AirScope.Windows.Services.Recovery.ps1")
                     ?? throw new IOException("The recovery engine is missing.");
                 string script = await new StreamReader(stream).ReadToEndAsync();
-                string payload = JsonSerializer.Serialize(new { AdapterId = request.AdapterId, Changes = request.Plan?.Changes, Id = request.RecoveryId }, JsonStore.Options);
+                string payload = JsonSerializer.Serialize(new { AdapterId = request.AdapterId, Changes = request.Plan?.Changes, Id = request.RecoveryId, request.ExpectedSsidHex }, JsonStore.Options);
                 result = await PowerShellRunner.RunAsync("& {" + script + "} -Operation " + PowerShellRunner.Quote(request.Operation)
                     + " -Payload " + PowerShellRunner.Quote(payload), TimeSpan.FromMinutes(6));
             }

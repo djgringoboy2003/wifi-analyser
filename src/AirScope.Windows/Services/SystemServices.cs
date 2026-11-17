@@ -14,20 +14,54 @@ public static class JsonStore
     public static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AirScope");
     public static T? Read<T>(string file)
     {
-        try { return JsonSerializer.Deserialize<T>(File.ReadAllText(Path.Combine(Root, file)), Options); }
+        try { return ReadPath<T>(Path.Combine(Root, file)); }
         catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException) { return default; }
     }
-    public static void Write<T>(string file, T value)
+    private static T? ReadPath<T>(string path)
     {
-        Directory.CreateDirectory(Root);
-        string path = Path.Combine(Root, file), temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(value, Options));
-        File.Move(temp, path, true);
+        if (!File.Exists(path)) return default;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return JsonSerializer.Deserialize<T>(stream, Options);
+    }
+    public static void Write<T>(string file, T value) => UpdatePath<T>(Path.Combine(Root, file), _ => value, readExisting: false);
+    public static T Update<T>(string file, Func<T?, T> update) => UpdatePath(Path.Combine(Root, file), update);
+    internal static T UpdatePath<T>(string path, Func<T?, T> update, bool readExisting = true)
+    {
+        using var transaction = LocalFileTransaction.Acquire(path);
+        T value = update(readExisting ? ReadPath<T>(path) : default); string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try { File.WriteAllText(temp, JsonSerializer.Serialize(value, Options)); File.Move(temp, path, true); }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
+        return value;
+    }
+    public static IReadOnlyList<SpeedResult> AppendSpeed(SpeedResult result) => Update<List<SpeedResult>>("speed-history.json",
+        history => new[] { result }.Concat(history ?? []).DistinctBy(s => (s.Time, s.Ssid, s.Bssid, s.Transport, s.Endpoint)).OrderByDescending(s => s.Time).Take(250).ToList());
+}
+
+internal static class LocalFileTransaction
+{
+    public static FileStream Acquire(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        var watch = Stopwatch.StartNew();
+        while (true)
+        {
+            try { return new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) when (watch.Elapsed < TimeSpan.FromSeconds(3)) { Thread.Sleep(10); }
+        }
     }
 }
 
 public sealed class UserSettings
 {
+    public static UserSettings Load()
+    {
+        var settings = JsonStore.Read<UserSettings>("settings.json") ?? new();
+        settings.TestOptions ??= new(); settings.Automation ??= new();
+        try { settings.TestOptions.Validate(); } catch (ArgumentException) { settings.TestOptions = new(); }
+        try { settings.Automation.Validate(); } catch (ArgumentException) { settings.Automation = new(); }
+        settings.RetentionDays = Math.Clamp(settings.RetentionDays, 1, 365); settings.ScanSeconds = Math.Clamp(settings.ScanSeconds, 15, 120);
+        return settings;
+    }
     public bool AutoScan { get; set; } = true;
     public bool MinimiseToTray { get; set; } = true;
     public bool ShowWidget { get; set; }
@@ -36,6 +70,11 @@ public sealed class UserSettings
     public Guid? AdapterId { get; set; }
     public string TargetSsid { get; set; } = "";
     public int ScanSeconds { get; set; } = 20;
+    public ThroughputOptions TestOptions { get; set; } = new();
+    public AutomationPolicy Automation { get; set; } = new();
+    public int RetentionDays { get; set; } = 30;
+    public double? ServiceMbps { get; set; }
+    public string? UpdatePublisherThumbprint { get; set; }
 }
 
 public static class PowerShellRunner
